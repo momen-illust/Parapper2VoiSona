@@ -1,0 +1,2 @@
+# Parapper2VoiSona
+Parapperで生成したテキストをVoiSona Talkに繋げる
