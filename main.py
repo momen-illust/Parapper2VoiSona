@@ -1,25 +1,21 @@
 
 import asyncio
-from contextlib import asynccontextmanager
+import json
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import httpx
-from fastapi import FastAPI, Request
 
+from config import get_int, get_str
 from voisona_client import VoiSonaClient
-
-from config import get_int
 
 
 voisona = VoiSonaClient()
-
 text_queue = asyncio.Queue(
     maxsize=get_int("QUEUE_MAX_SIZE", 100)
 )
 
 
 async def speech_worker():
-    """キュー内のテキストを順番にVoiSonaへ送信する"""
-
     while True:
         text = await text_queue.get()
 
@@ -57,72 +53,130 @@ async def speech_worker():
             text_queue.task_done()
 
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    worker = None
+class EventHandler(BaseHTTPRequestHandler):
+    loop = None
+    queue = None
 
-    try:
-        await voisona.initialize()
+    def send_json(self, status, data):
+        body = json.dumps(data).encode("utf-8")
 
-        # バックグラウンドでWorkerを1つ起動
-        worker = asyncio.create_task(speech_worker())
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
 
-        yield
+    def do_POST(self):
+        if self.path != "/api/events":
+            self.send_json(404, {"status": "not_found"})
+            return
 
-    finally:
-        if worker is not None:
-            worker.cancel()
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
 
-            try:
-                await worker
-            except asyncio.CancelledError:
-                pass
+            if length <= 0 or length > 1024 * 1024:
+                self.send_json(400, {"status": "invalid_length"})
+                return
 
-        await voisona.close()
+            body = self.rfile.read(length)
+            event = json.loads(body)
 
+            if not isinstance(event, dict):
+                self.send_json(400, {"status": "invalid_event"})
+                return
 
-app = FastAPI(
-    title="Parapper2VoiSona",
-    lifespan=lifespan,
-)
+        except (ValueError, UnicodeDecodeError):
+            self.send_json(400, {"status": "invalid_json"})
+            return
 
+        if event.get("type") != "turn.final":
+            self.send_json(200, {"status": "ignored"})
+            return
 
-@app.post("/api/events")
-async def receive_event(request: Request):
-    event = await request.json()
+        text = event.get("text", "")
 
-    if event.get("type") != "turn.final":
-        return {"status": "ignored"}
+        if not isinstance(text, str) or not text.strip():
+            self.send_json(200, {"status": "ignored"})
+            return
 
-    text = event.get("text", "")
+        text = text.strip()
 
-    if not isinstance(text, str) or not text.strip():
-        return {"status": "ignored"}
+        # HTTPスレッドからasyncioイベントループへ渡す
+        future = asyncio.run_coroutine_threadsafe(
+            self.enqueue(text),
+            self.loop,
+        )
 
-    text = text.strip()
+        try:
+            result = future.result(timeout=1.0)
+            self.send_json(200, result)
 
-    try:
-        # キューに追加。VoiSonaの処理完了は待たない
-        text_queue.put_nowait(text)
+        except Exception as error:
+            future.cancel()
+            print(f"[HTTP] キュー登録エラー: {error}", flush=True)
+            self.send_json(503, {"status": "error"})
 
-    except asyncio.QueueFull:
+    async def enqueue(self, text):
+        try:
+            self.queue.put_nowait(text)
+
+        except asyncio.QueueFull:
+            print(f"[Queue] 満杯のため破棄: {text}", flush=True)
+            return {
+                "status": "dropped",
+                "reason": "queue_full",
+            }
+
         print(
-            f"[Queue] 満杯のため破棄: {text}",
+            f"[Queue] 追加: {text} "
+            f"(待機数: {self.queue.qsize()})",
             flush=True,
         )
 
         return {
-            "status": "dropped",
-            "reason": "queue_full",
+            "status": "queued",
+            "queue_size": self.queue.qsize(),
         }
 
-    print(
-        f"[Queue] 追加: {text} "
-        f"(待機数: {text_queue.qsize()})",
-        flush=True,
-    )
 
-    return {
-        "status": "queued",
-        "queue_size": text_queue.qsize(),
-    }
+async def main():
+    await voisona.initialize()
+
+    worker = asyncio.create_task(speech_worker())
+
+    host = get_str("SERVER_HOST", "127.0.0.1")
+    port = get_int("SERVER_PORT", 15522)
+
+    EventHandler.loop = asyncio.get_running_loop()
+    EventHandler.queue = text_queue
+
+    server = ThreadingHTTPServer(
+        (host, port),
+        EventHandler,
+    )
+    server.daemon_threads = True
+
+    print(f"[Server] http://{host}:{port}", flush=True)
+
+    try:
+        await asyncio.to_thread(server.serve_forever)
+
+    finally:
+        await asyncio.to_thread(server.shutdown)
+        server.server_close()
+
+        worker.cancel()
+
+        try:
+            await worker
+        except asyncio.CancelledError:
+            pass
+
+        await voisona.close()
+
+
+if __name__ == "__main__":
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("[Server] 停止しました", flush=True)
