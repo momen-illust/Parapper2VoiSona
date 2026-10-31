@@ -1,12 +1,8 @@
-
 import asyncio
 import json
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-
-import httpx
-
 from config import get_int, get_str
-from voisona_client import VoiSonaClient
+from voisona_client import VoiSonaClient, VoiSonaHTTPError
 
 
 voisona = VoiSonaClient()
@@ -29,15 +25,14 @@ async def speech_worker():
                 flush=True,
             )
 
-        except httpx.HTTPStatusError as error:
+        except VoiSonaHTTPError as error:
             print(
                 f"[VoiSona] HTTPエラー: "
-                f"{error.response.status_code} "
-                f"{error.response.text}",
+                f"{error.status_code} {error}",
                 flush=True,
             )
 
-        except httpx.RequestError as error:
+        except OSError as error:
             print(
                 f"[VoiSona] 通信エラー: {error}",
                 flush=True,
@@ -142,37 +137,59 @@ class EventHandler(BaseHTTPRequestHandler):
 async def main():
     await voisona.initialize()
 
-    worker = asyncio.create_task(speech_worker())
-
-    host = get_str("SERVER_HOST", "127.0.0.1")
-    port = get_int("SERVER_PORT", 15522)
-
-    EventHandler.loop = asyncio.get_running_loop()
-    EventHandler.queue = text_queue
-
-    server = ThreadingHTTPServer(
-        (host, port),
-        EventHandler,
-    )
-    server.daemon_threads = True
-
-    print(f"[Server] http://{host}:{port}", flush=True)
+    worker = None
+    server = None
+    server_task = None
 
     try:
-        await asyncio.to_thread(server.serve_forever)
+        worker = asyncio.create_task(speech_worker())
+
+        host = get_str("SERVER_HOST", "127.0.0.1")
+        port = get_int("SERVER_PORT", 15522)
+
+        EventHandler.loop = asyncio.get_running_loop()
+        EventHandler.queue = text_queue
+
+        server = ThreadingHTTPServer(
+            (host, port),
+            EventHandler,
+        )
+        server.daemon_threads = True
+
+        print(
+            f"[Server] 起動しました: http://{host}:{port}",
+            flush=True,
+        )
+        print(
+            "[Server] 終了するには Ctrl+C を押してください",
+            flush=True,
+        )
+
+        server_task = asyncio.create_task(
+            asyncio.to_thread(server.serve_forever)
+        )
+
+        await asyncio.shield(server_task)
 
     finally:
-        await asyncio.to_thread(server.shutdown)
-        server.server_close()
+        if server is not None:
+            await asyncio.to_thread(server.shutdown)
+            server.server_close()
 
-        worker.cancel()
+        if server_task is not None:
+            await server_task
 
-        try:
-            await worker
-        except asyncio.CancelledError:
-            pass
+        if worker is not None:
+            worker.cancel()
+
+            try:
+                await worker
+            except asyncio.CancelledError:
+                pass
 
         await voisona.close()
+
+        print("[Server] 終了しました", flush=True)
 
 
 if __name__ == "__main__":
