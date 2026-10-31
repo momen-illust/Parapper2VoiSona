@@ -1,30 +1,26 @@
 
-import os
-
 import httpx
-from dotenv import load_dotenv
-
-load_dotenv()
+from config import get_str, get_int
 
 
 class VoiSonaClient:
     def __init__(self):
-        user = os.getenv("VOISONA_USER")
-        password = os.getenv("VOISONA_API_PASSWORD")
-        port = os.getenv("VOISONA_PORT", "32766")
+        host = get_str("VOISONA_HOST", "127.0.0.1")
+        port = get_int("VOISONA_PORT", 32766)
 
-        if not user or not password:
-            raise ValueError(
-                "VOISONA_USERとVOISONA_API_PASSWORDを"
-                ".envに設定してください"
-            )
+        self.base_url = (
+            f"http://{host}:{port}/api/talk/v1"
+        )
 
-        self.base_url = f"http://127.0.0.1:{port}/api/talk/v1"
         self.client = httpx.AsyncClient(
-            auth=httpx.BasicAuth(user, password),
-            timeout=10.0,
+            auth=httpx.BasicAuth(
+                get_str("VOISONA_USER"),
+                get_str("VOISONA_API_PASSWORD"),
+            ),
+            timeout=15.0,
             trust_env=False,
         )
+
         self.voice = None
 
     async def initialize(self):
@@ -46,18 +42,21 @@ class VoiSonaClient:
 
         if self.voice is None:
             raise RuntimeError(
-                "日本語のボイスライブラリが見つかりません"
+                "日本語ボイスが見つかりません"
             )
 
         print(
             "[VoiSona] 使用ボイス:",
             self.voice["voice_name"],
             self.voice["voice_version"],
+            flush=True,
         )
 
     async def speak(self, text: str):
         if self.voice is None:
-            raise RuntimeError("VoiSonaClientが初期化されていません")
+            raise RuntimeError(
+                "VoiSonaClientが初期化されていません"
+            )
 
         payload = {
             "text": text,
@@ -73,9 +72,7 @@ class VoiSonaClient:
         )
         response.raise_for_status()
 
-        uuid = response.json()["uuid"]
-        print(f"[VoiSona] 合成リクエスト受付: {uuid}")
-        return uuid
+        return response.json()["uuid"]
 
     async def close(self):
         await self.client.aclose()
