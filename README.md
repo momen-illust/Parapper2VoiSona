@@ -19,15 +19,14 @@ Parapper-ASRが認識したテキストをHTTP経由で受信し、VoiSona Talk�
 ## 導入方法
 
 1. GitHub Releasesから配布用ZIPをダウンロードして展開します。
-2. `config.env.example` を `config.env` にコピーします（配布物に `config.env` が含まれている場合はコピー不要）。
-3. `config.env` にVoiSona TalkのREST API用メールアドレス・パスワード・ポート番号を設定します。
-4. VoiSona Talkを起動し、REST APIを有効にします。
-5. `Parapper2VoiSona.exe` を起動します。
-6. Parapper-ASRのDeveloper HTTP送信先を次のURLに設定します。
+2. `config.env` にVoiSona TalkのREST API用メールアドレス・パスワード・ポート番号を設定します。
+3. VoiSona Talkを起動し、REST APIを有効にします。
+4. `Parapper2VoiSona.exe` を起動します。
+5. Parapper-ASRのDeveloper HTTP送信先を次のURLに設定します。
 
    `http://127.0.0.1:15522/api/events`
 
-7. Parapper-ASRで音声認識を行うと、確定したテキストがVoiSona Talkで読み上げられます。
+6. Parapper-ASRで音声認識を行うと、確定したテキストがVoiSona Talkで読み上げられます。
 
 ## 設定項目
 
